@@ -14,6 +14,75 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ---------------------------------------------------------------- auth
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  sessions    Session[]
+  memberships DealMember[]
+  auditLogs   AuditLog[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+// Per-deal access: owner (manage members + everything), editor (edit/approve),
+// viewer (read-only).
+model DealMember {
+  id        String   @id @default(cuid())
+  companyId String
+  company   TargetCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      String   @default("editor") // owner | editor | viewer
+  createdAt DateTime @default(now())
+
+  @@unique([companyId, userId])
+}
+
+// Immutable trail of sensitive actions (approvals, score edits, exclusions...).
+model AuditLog {
+  id         String   @id @default(cuid())
+  companyId  String?
+  company    TargetCompany? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action     String
+  targetType String?
+  targetId   String?
+  detail     String?  // JSON
+  createdAt  DateTime @default(now())
+}
+
+// Advisor-maintained comparable-transactions library, fed to the valuation
+// agent. `illustrative` marks fictional/seeded entries so they are labelled.
+model ComparableTransaction {
+  id              String   @id @default(cuid())
+  acquirer        String
+  target          String
+  sector          String
+  announcedYear   Int?
+  enterpriseValue String?  // freeform, e.g. "$120M"
+  revenueOrArr    String?  // e.g. "$15M ARR"
+  multiple        String?  // e.g. "8x ARR"
+  dealType        String?  // tuck-in | platform | bolt-on | ...
+  source          String?
+  notes           String?
+  illustrative    Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
 model TargetCompany {
   id                 String   @id @default(cuid())
   name               String
@@ -43,6 +112,8 @@ model TargetCompany {
   buyers      Buyer[]
   outreach    OutreachMessage[]
   reports     Report[]
+  members     DealMember[]
+  auditLogs   AuditLog[]
 }
 
 model Deck {

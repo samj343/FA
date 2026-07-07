@@ -93,7 +93,8 @@ export const AGENT_PROMPTS: Record<AgentName, { role: string; goal: string; rule
     goal: 'Identify the relevant valuation method, likely deal type (tuck-in, platform, acquihire, distressed sale, strategic premium, PE bolt-on), valuation drivers and risks, a rough directional range only if the data supports one, buyer-affordability notes for the top-ranked buyers, and the data needed for a better valuation.',
     rules: `- Always state this is directional and not a formal valuation.
 - If there is not enough data, say a range cannot be estimated responsibly.
-- Use conservative assumptions and explain the logic clearly.`,
+- Use conservative assumptions and explain the logic clearly.
+- If comparable_transactions are provided in the input, reference the relevant ones in your valuation logic and drivers, quoting their multiples. Treat any comp flagged "illustrative": true as a fictional example — label it as such and never present it as a real market data point. Do not invent comps that were not provided.`,
   },
   synergy_thesis: {
     role: 'You are the Synergy Thesis Agent, a buyer-coverage banker who writes buyer-specific acquisition theses.',

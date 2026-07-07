@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { getSettings, weightedScore, tierFor } from '@/lib/scoring';
+import { audit, getSessionUser, unauthorized } from '@/lib/auth';
 
 const w = z.number().min(0).max(1);
 const PatchSchema = z.object({
@@ -20,12 +21,15 @@ const PatchSchema = z.object({
 });
 
 export async function GET() {
+  if (!(await getSessionUser())) return unauthorized();
   return NextResponse.json(await getSettings());
 }
 
 // PATCH /api/settings — update weights etc. Recomputes every stored weighted
 // score so the ranked list stays consistent with the new weights.
 export async function PATCH(req: NextRequest) {
+  const user = await getSessionUser();
+  if (!user) return unauthorized();
   const body = await req.json().catch(() => null);
   const parsed = PatchSchema.safeParse(body);
   if (!parsed.success) {
@@ -71,5 +75,6 @@ export async function PATCH(req: NextRequest) {
       data: { weightedScore: ws, tier: tierFor(ws) },
     });
   }
+  await audit({ action: 'settings.updated', userId: user.id, detail: parsed.data });
   return NextResponse.json(settings);
 }

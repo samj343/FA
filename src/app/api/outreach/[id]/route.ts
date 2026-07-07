@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
+import { audit, guardCompany } from '@/lib/auth';
 
 const STATUSES = [
   'Draft', 'Needs Review', 'Approved', 'Rejected', 'Sent', 'Follow-up Needed',
@@ -11,6 +12,7 @@ const PatchSchema = z.object({
   subject: z.string().optional(),
   body: z.string().optional(),
   status: z.enum(STATUSES).optional(),
+  contactId: z.string().nullable().optional(),
 });
 
 // PATCH /api/outreach/:id — edit draft content or move it through the
@@ -23,6 +25,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   }
   const message = await prisma.outreachMessage.findUnique({ where: { id: params.id } });
   if (!message) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  const guard = await guardCompany(message.companyId, 'editor');
+  if (guard instanceof Response) return guard;
 
   if (parsed.data.status === 'Sent' && !message.approvedByUser) {
     return NextResponse.json(
@@ -41,6 +45,18 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
         ? { status: 'Needs Review', approvedByUser: false }
         : {}),
       ...(parsed.data.status === 'Sent' ? { sentAt: new Date() } : {}),
+    },
+  });
+  await audit({
+    action: parsed.data.status ? 'outreach.status_changed' : 'outreach.edited',
+    userId: guard.user.id,
+    companyId: message.companyId,
+    targetType: 'outreach',
+    targetId: message.id,
+    detail: {
+      messageType: message.messageType,
+      ...(parsed.data.status ? { status: parsed.data.status } : {}),
+      ...(contentEdited ? { contentEdited: true } : {}),
     },
   });
   return NextResponse.json(updated);

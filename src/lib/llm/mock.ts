@@ -319,10 +319,23 @@ function scoring(input: any) {
 }
 
 function valuation(input: any) {
+  const comps: any[] = input.comparable_transactions || [];
+  const compNotes = comps.map(
+    (c) =>
+      `${c.acquirer} / ${c.target} (${c.announced_year ?? 'n/a'}): ${c.multiple ?? 'multiple undisclosed'}${c.illustrative ? ' [ILLUSTRATIVE — fictional example]' : ''}`
+  );
   return {
-    valuation_approach: 'ARR multiple framework, contingent on verified recurring revenue; strategic-value framing for buyers with acute product gaps',
+    valuation_approach: comps.length
+      ? `ARR multiple framework anchored to ${comps.length} comparable transaction(s) from the advisor's library, contingent on verified recurring revenue`
+      : 'ARR multiple framework, contingent on verified recurring revenue; strategic-value framing for buyers with acute product gaps',
     possible_deal_type: 'Tuck-in acquisition or PE bolt-on, depending on scale',
-    valuation_drivers: ['Verified ARR and growth', 'Net revenue retention', 'Strategic scarcity of the asset', 'Competitive tension in the process'],
+    valuation_drivers: [
+      'Verified ARR and growth',
+      'Net revenue retention',
+      'Strategic scarcity of the asset',
+      'Competitive tension in the process',
+      ...compNotes.map((n) => `Comparable: ${n}`),
+    ],
     valuation_risks: ['Unverified financials', 'Customer concentration', 'Buyer ability to build internally'],
     rough_range_if_possible: 'Insufficient verified data to produce a responsible range. Directional only once ARR/growth/NRR are confirmed. This is not a formal valuation.',
     buyer_affordability_notes: ['Tier 1 strategics: likely balance-sheet funded', 'PE platforms: sponsor capital available for bolt-ons', 'Smaller strategics: may require structure (earn-out / stock)'],

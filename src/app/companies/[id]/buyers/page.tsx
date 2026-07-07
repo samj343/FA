@@ -4,10 +4,12 @@ import { prisma } from '@/lib/db';
 import CompanyNav from '@/components/CompanyNav';
 import ExcludeBuyerButton from '@/components/ExcludeBuyerButton';
 import { PageTitle, TierBadge, FitBadge, ConfidenceBadge } from '@/components/ui';
+import { requireMemberPage } from '@/lib/page-auth';
 
 export const dynamic = 'force-dynamic';
 
 export default async function BuyerUniversePage({ params }: { params: { id: string } }) {
+  await requireMemberPage(params.id);
   const company = await prisma.targetCompany.findUnique({ where: { id: params.id } });
   if (!company) notFound();
 

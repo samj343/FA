@@ -13,12 +13,15 @@ type Message = {
   id: string;
   buyerId: string | null;
   buyer?: { name: string } | null;
+  contactId: string | null;
   messageType: string;
   subject: string | null;
   body: string;
   status: string;
   approvedByUser: boolean;
 };
+
+type ContactOption = { id: string; name: string | null; type: string | null };
 
 const TYPE_LABELS: Record<string, string> = {
   anonymous_teaser: 'Anonymous teaser',
@@ -41,6 +44,7 @@ export default function OutreachPage() {
   const { id } = useParams<{ id: string }>();
   const [messages, setMessages] = useState<Message[]>([]);
   const [buyerNames, setBuyerNames] = useState<Record<string, string>>({});
+  const [buyerContacts, setBuyerContacts] = useState<Record<string, ContactOption[]>>({});
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
@@ -52,8 +56,13 @@ export default function OutreachPage() {
     ]);
     const buyers = await buyersRes.json();
     const names: Record<string, string> = {};
-    for (const b of buyers) names[b.id] = b.name;
+    const contacts: Record<string, ContactOption[]> = {};
+    for (const b of buyers) {
+      names[b.id] = b.name;
+      contacts[b.id] = b.contacts ?? [];
+    }
     setBuyerNames(names);
+    setBuyerContacts(contacts);
     // outreach messages come via a dedicated fetch of the company's drafts
     const res = await fetch(`/api/companies/${id}/outreach-list`);
     setMessages(await res.json());
@@ -126,6 +135,19 @@ export default function OutreachPage() {
                   <StatusBadge status={m.status} />
                 </div>
                 <div className="flex items-center gap-2">
+                  {m.buyerId && (buyerContacts[m.buyerId]?.length ?? 0) > 0 && (
+                    <select
+                      className="input w-auto py-1 text-xs"
+                      value={m.contactId ?? ''}
+                      onChange={(e) => patch(m.id, { contactId: e.target.value || null })}
+                      title="Contact this draft is addressed to"
+                    >
+                      <option value="">no contact</option>
+                      {buyerContacts[m.buyerId].map((c) => (
+                        <option key={c.id} value={c.id}>{c.name} ({c.type})</option>
+                      ))}
+                    </select>
+                  )}
                   <select
                     className="input w-auto py-1 text-xs"
                     value={m.status}

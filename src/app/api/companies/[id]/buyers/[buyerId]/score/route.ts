@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { getWeights, weightedScore, tierFor } from '@/lib/scoring';
+import { audit, guardCompany } from '@/lib/auth';
 
 const s10 = z.number().min(1).max(10);
 const PatchSchema = z.object({
@@ -22,6 +23,8 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string; buyerId: string } }
 ) {
+  const guard = await guardCompany(params.id, 'editor');
+  if (guard instanceof Response) return guard;
   const body = await req.json().catch(() => null);
   const parsed = PatchSchema.safeParse(body);
   if (!parsed.success) {
@@ -69,6 +72,14 @@ export async function PATCH(
       ...(parsed.data.keyRisk !== undefined ? { keyRisk: parsed.data.keyRisk } : {}),
       manuallyEdited: true,
     },
+  });
+  await audit({
+    action: 'score.edited',
+    userId: guard.user.id,
+    companyId: params.id,
+    targetType: 'buyer_score',
+    targetId: buyer.id,
+    detail: { buyer: buyer.name, changes: parsed.data, weightedScore: ws, tier: tierFor(ws) },
   });
   return NextResponse.json(score);
 }

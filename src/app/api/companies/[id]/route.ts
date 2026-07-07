@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { guardCompany } from '@/lib/auth';
 
 // GET /api/companies/:id — full company profile incl. artifacts
 export async function GET(_req: Request, { params }: { params: { id: string } }) {
+  const guard = await guardCompany(params.id, 'viewer');
+  if (guard instanceof Response) return guard;
   const company = await prisma.targetCompany.findUnique({
     where: { id: params.id },
     include: {

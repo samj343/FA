@@ -48,25 +48,59 @@ async function saveArtifact(companyId: string, kind: string, data: unknown) {
   });
 }
 
+// In-process job queue: runs execute one at a time so concurrent analyses
+// don't compete for LLM throughput or interleave DB writes. Runs are created
+// as "queued" and flip to "running" when the worker picks them up. (For a
+// multi-instance deployment, swap this for a real queue — the seam is here.)
+let queueTail: Promise<unknown> = Promise.resolve();
+
+function enqueue(runId: string, companyId: string, resume: boolean): void {
+  queueTail = queueTail
+    .then(async () => {
+      await prisma.analysisRun.update({ where: { id: runId }, data: { status: 'running' } });
+      await runFullAnalysis(companyId, runId, { resume });
+    })
+    .catch(async (err) => {
+      console.error('Analysis run failed:', err);
+      await prisma.analysisRun
+        .update({
+          where: { id: runId },
+          data: { status: 'error', error: err instanceof Error ? err.message : String(err) },
+        })
+        .catch(() => {});
+    });
+}
+
 export async function startAnalysisRun(companyId: string): Promise<string> {
   const steps: StepState[] = PIPELINE_STEPS.map((s) => ({ ...s, status: 'pending' }));
   const run = await prisma.analysisRun.create({
     data: {
       companyId,
-      status: 'running',
+      status: 'queued',
       steps: JSON.stringify(steps),
       provider: getProvider().name,
     },
   });
-  // Fire and forget — the route returns immediately; the UI polls run status.
-  runFullAnalysis(companyId, run.id).catch(async (err) => {
-    console.error('Analysis run failed:', err);
-    await prisma.analysisRun.update({
-      where: { id: run.id },
-      data: { status: 'error', error: err instanceof Error ? err.message : String(err) },
-    });
-  });
+  enqueue(run.id, companyId, false);
   return run.id;
+}
+
+/**
+ * Resume a failed run: completed steps are skipped (their outputs are loaded
+ * from the DB), the failed/pending steps re-run. Returns the same run id.
+ */
+export async function resumeAnalysisRun(runId: string): Promise<string> {
+  const run = await prisma.analysisRun.findUniqueOrThrow({ where: { id: runId } });
+  if (run.status === 'running' || run.status === 'queued') return run.id;
+  const steps: StepState[] = JSON.parse(run.steps).map((s: StepState) =>
+    s.status === 'done' ? s : { ...s, status: 'pending' }
+  );
+  await prisma.analysisRun.update({
+    where: { id: runId },
+    data: { status: 'queued', error: null, steps: JSON.stringify(steps), currentStep: null },
+  });
+  enqueue(runId, run.companyId, true);
+  return runId;
 }
 
 async function setStep(runId: string, key: string, status: StepState['status']) {
@@ -84,8 +118,16 @@ async function setStep(runId: string, key: string, status: StepState['status']) 
  * The full agentic workflow. Each stage feeds the next; structured outputs
  * are validated by zod before persistence. Human review happens after the
  * run — nothing here contacts a buyer.
+ *
+ * With opts.resume, steps already marked "done" on the run are skipped and
+ * their outputs are loaded back from the DB, so a failed run can be retried
+ * from the failed step without re-paying for completed agents.
  */
-export async function runFullAnalysis(companyId: string, runId: string): Promise<void> {
+export async function runFullAnalysis(
+  companyId: string,
+  runId: string,
+  opts: { resume?: boolean } = {}
+): Promise<void> {
   const company = await prisma.targetCompany.findUniqueOrThrow({
     where: { id: companyId },
     include: { decks: { orderBy: { createdAt: 'desc' }, take: 1 } },
@@ -95,6 +137,13 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
     ...parseJsonArray(company.excludedBuyers),
     ...parseJsonArray(settings.globalExcludedBuyers),
   ];
+
+  const run = await prisma.analysisRun.findUniqueOrThrow({ where: { id: runId } });
+  const doneSteps = new Set<string>(
+    opts.resume
+      ? (JSON.parse(run.steps) as StepState[]).filter((s) => s.status === 'done').map((s) => s.key)
+      : []
+  );
 
   const step = async <T>(key: string, fn: () => Promise<T>): Promise<T> => {
     await setStep(runId, key, 'running');
@@ -108,9 +157,24 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
     }
   };
 
+  const loadArtifact = async <T>(kind: string): Promise<T> => {
+    const a = await prisma.analysisArtifact.findUniqueOrThrow({
+      where: { companyId_kind: { companyId, kind } },
+    });
+    return JSON.parse(a.json) as T;
+  };
+
+  /** Run an artifact-producing step, or reload its persisted output on resume. */
+  const artifactStep = async <T>(key: string, kind: string, fn: () => Promise<T>): Promise<T> => {
+    if (doneSteps.has(key)) return loadArtifact<T>(kind);
+    const out = await step(key, fn);
+    await saveArtifact(companyId, kind, out);
+    return out;
+  };
+
   // -------------------------------------------------- 1. Deck Intake
   const deckText = company.decks[0]?.extractedText ?? '';
-  const intake = await step('deck_intake', () =>
+  const intake = await artifactStep('deck_intake', 'deck_intake', () =>
     runAgent('deck_intake', {
       company_name: company.name,
       website: company.website,
@@ -123,14 +187,12 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
       market_notes: company.marketNotes,
     })
   );
-  await saveArtifact(companyId, 'deck_intake', intake);
 
   // -------------------------------------------------- 2. Company Profile
-  const profile = await step('company_profile', () =>
+  const profile = await artifactStep('company_profile', 'company_profile', () =>
     runAgent('company_profile', { deck_intake: intake })
   );
-  await saveArtifact(companyId, 'company_profile', profile);
-  await prisma.targetCompany.update({
+  if (!doneSteps.has('company_profile')) await prisma.targetCompany.update({
     where: { id: companyId },
     data: {
       sector: intake.sector !== 'Not provided' ? intake.sector : company.sector,
@@ -145,61 +207,64 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
   });
 
   // -------------------------------------------------- 3. Financial Analysis
-  const financial = await step('financial_analysis', () =>
+  const financial = await artifactStep('financial_analysis', 'financial_analysis', () =>
     runAgent('financial_analysis', { deck_intake: intake })
   );
-  await saveArtifact(companyId, 'financial_analysis', financial);
 
   // -------------------------------------------------- 4. Market Map
-  const market = await step('market_map', () =>
+  const market = await artifactStep('market_map', 'market_map', () =>
     runAgent('market_map', { company_profile: profile, deck_intake: intake })
   );
-  await saveArtifact(companyId, 'market_map', market);
 
   // -------------------------------------------------- 5. Competitive Landscape
-  const landscape = await step('competitive_landscape', () =>
+  const landscape = await artifactStep('competitive_landscape', 'competitive_landscape', () =>
     runAgent('competitive_landscape', { company_profile: profile, market_map: market })
   );
-  await saveArtifact(companyId, 'competitive_landscape', landscape);
 
   // -------------------------------------------------- 6. Buyer Discovery
-  const discovery = await step('buyer_discovery', () =>
-    runAgent('buyer_discovery', {
-      company_profile: profile,
-      market_map: market,
-      competitive_landscape: landscape,
-      preferred_buyer_types: company.preferredBuyerTypes,
-      excluded_buyers: excluded,
-    }, { maxTokens: 32000 })
-  );
-  await saveArtifact(companyId, 'buyer_discovery_meta', {
-    facts: discovery.facts,
-    assumptions: discovery.assumptions,
-    missing_data: discovery.missing_data,
-    confidence_score: discovery.confidence_score,
-  });
-
-  // Replace prior buyer set for a clean re-run.
-  await prisma.buyer.deleteMany({ where: { companyId } });
-  const exLower = excluded.map((e) => e.toLowerCase());
-  const universe = discovery.buyer_universe.filter(
-    (b) => !exLower.some((e) => e && b.buyer_name.toLowerCase().includes(e))
-  );
-  const buyers = [] as { id: string; name: string; buyerType: string; industry: string | null; initialRationale: string | null; estimatedFit: string | null }[];
-  for (const b of universe) {
-    const row = await prisma.buyer.create({
-      data: {
-        companyId,
-        name: b.buyer_name,
-        buyerType: b.buyer_type,
-        industry: b.industry,
-        initialRationale: b.initial_rationale,
-        buyerCategory: b.buyer_category,
-        estimatedFit: b.estimated_fit,
-        researchNeeded: JSON.stringify(b.research_needed),
-      },
+  type BuyerRef = { id: string; name: string; buyerType: string; industry: string | null; initialRationale: string | null; estimatedFit: string | null };
+  let buyers: BuyerRef[];
+  if (doneSteps.has('buyer_discovery')) {
+    buyers = await prisma.buyer.findMany({ where: { companyId, excluded: false } });
+  } else {
+    const discovery = await step('buyer_discovery', () =>
+      runAgent('buyer_discovery', {
+        company_profile: profile,
+        market_map: market,
+        competitive_landscape: landscape,
+        preferred_buyer_types: company.preferredBuyerTypes,
+        excluded_buyers: excluded,
+      }, { maxTokens: 32000 })
+    );
+    await saveArtifact(companyId, 'buyer_discovery_meta', {
+      facts: discovery.facts,
+      assumptions: discovery.assumptions,
+      missing_data: discovery.missing_data,
+      confidence_score: discovery.confidence_score,
     });
-    buyers.push({ id: row.id, name: row.name, buyerType: row.buyerType, industry: row.industry, initialRationale: row.initialRationale, estimatedFit: row.estimatedFit });
+
+    // Replace prior buyer set for a clean re-run.
+    await prisma.buyer.deleteMany({ where: { companyId } });
+    const exLower = excluded.map((e) => e.toLowerCase());
+    const universe = discovery.buyer_universe.filter(
+      (b) => !exLower.some((e) => e && b.buyer_name.toLowerCase().includes(e))
+    );
+    buyers = [];
+    for (const b of universe) {
+      const row = await prisma.buyer.create({
+        data: {
+          companyId,
+          name: b.buyer_name,
+          buyerType: b.buyer_type,
+          industry: b.industry,
+          initialRationale: b.initial_rationale,
+          buyerCategory: b.buyer_category,
+          estimatedFit: b.estimated_fit,
+          researchNeeded: JSON.stringify(b.research_needed),
+        },
+      });
+      buyers.push({ id: row.id, name: row.name, buyerType: row.buyerType, industry: row.industry, initialRationale: row.initialRationale, estimatedFit: row.estimatedFit });
+    }
   }
 
   // -------------------------------------------------- 7. Buyer Research
@@ -210,7 +275,7 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
     .sort((a, b) => (fitRank[a.estimatedFit ?? 'Low'] ?? 2) - (fitRank[b.estimatedFit ?? 'Low'] ?? 2))
     .slice(0, 25);
 
-  await step('buyer_research', async () => {
+  if (!doneSteps.has('buyer_research')) await step('buyer_research', async () => {
     const researchSvc = getResearchService();
     const webNotes = await researchSvc.research(
       toResearch.map((b) => b.name),
@@ -258,7 +323,7 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
 
   // -------------------------------------------------- 8. Strategic Fit Scoring
   const weights = await getWeights();
-  await step('strategic_fit_scoring', async () => {
+  if (!doneSteps.has('strategic_fit_scoring')) await step('strategic_fit_scoring', async () => {
     const researched = await prisma.buyer.findMany({
       where: { companyId, research: { isNot: null } },
       include: { research: true },
@@ -310,15 +375,44 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
   });
 
   // -------------------------------------------------- 9. Valuation & Deal Logic
+  // Feed matching entries from the advisor's comparable-transactions library
+  // to the valuation agent (matched on sector keywords, newest first).
+  const sectorWords = String(profile.industry_category || company.sector || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 3);
+  const allComps = await prisma.comparableTransaction.findMany({
+    orderBy: { createdAt: 'desc' },
+  });
+  const comps = allComps
+    .filter((c) => {
+      const hay = `${c.sector} ${c.notes ?? ''}`.toLowerCase();
+      return sectorWords.length === 0 || sectorWords.some((w) => hay.includes(w));
+    })
+    .slice(0, 10)
+    .map((c) => ({
+      acquirer: c.acquirer,
+      target: c.target,
+      sector: c.sector,
+      announced_year: c.announcedYear,
+      enterprise_value: c.enterpriseValue,
+      revenue_or_arr: c.revenueOrArr,
+      multiple: c.multiple,
+      deal_type: c.dealType,
+      source: c.source,
+      illustrative: c.illustrative,
+    }));
+
   const topScored = await prisma.buyer.findMany({
     where: { companyId, score: { isNot: null } },
     include: { score: true, research: true },
     orderBy: { score: { weightedScore: 'desc' } },
   });
-  const valuation = await step('valuation', () =>
+  await artifactStep('valuation', 'valuation', () =>
     runAgent('valuation', {
       company_profile: profile,
       financial_analysis: financial,
+      comparable_transactions: comps,
       top_buyers: topScored.slice(0, 10).map((b) => ({
         buyer_name: b.name,
         buyer_type: b.buyerType,
@@ -327,7 +421,6 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
       })),
     })
   );
-  await saveArtifact(companyId, 'valuation', valuation);
 
   // -------------------------------------------------- 10. Synergy Theses
   const thesisTargets = topScored
@@ -336,7 +429,7 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
   // If tiering is harsh, still produce theses for the top 5 overall.
   const finalThesisTargets = thesisTargets.length >= 3 ? thesisTargets : topScored.slice(0, 5);
 
-  await step('synergy_thesis', async () => {
+  if (!doneSteps.has('synergy_thesis')) await step('synergy_thesis', async () => {
     for (const batch of chunk(finalThesisTargets, 5)) {
       const out = await runAgent('synergy_thesis', {
         company_profile: profile,
@@ -380,12 +473,12 @@ export async function runFullAnalysis(companyId: string, runId: string): Promise
   });
 
   // -------------------------------------------------- 11. Outreach drafts
-  await step('outreach', async () => {
+  if (!doneSteps.has('outreach')) await step('outreach', async () => {
     await generateOutreachDrafts(companyId);
   });
 
   // -------------------------------------------------- 12. Report
-  await step('report', async () => {
+  if (!doneSteps.has('report')) await step('report', async () => {
     const markdown = await generateReportMarkdown(companyId);
     await prisma.report.create({
       data: {

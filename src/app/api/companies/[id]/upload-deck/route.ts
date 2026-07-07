@@ -3,9 +3,12 @@ import { mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 import { prisma } from '@/lib/db';
 import { extractDeckText } from '@/lib/pdf';
+import { audit, guardCompany } from '@/lib/auth';
 
 // POST /api/companies/:id/upload-deck — multipart form with "file" (PDF).
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+  const guard = await guardCompany(params.id, 'editor');
+  if (guard instanceof Response) return guard;
   const company = await prisma.targetCompany.findUnique({ where: { id: params.id } });
   if (!company) return NextResponse.json({ error: 'Company not found' }, { status: 404 });
 
@@ -46,6 +49,14 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       pageCount,
       extractedText: text,
     },
+  });
+  await audit({
+    action: 'deck.uploaded',
+    userId: guard.user.id,
+    companyId: params.id,
+    targetType: 'deck',
+    targetId: deck.id,
+    detail: { filename: file.name, pageCount },
   });
   return NextResponse.json(
     { id: deck.id, filename: deck.filename, pageCount, textLength: text.length },

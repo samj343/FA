@@ -1,12 +1,16 @@
 import Link from 'next/link';
 import { prisma } from '@/lib/db';
 import { PageTitle, StatusBadge } from '@/components/ui';
+import { requireUserPage } from '@/lib/page-auth';
 
 export const dynamic = 'force-dynamic';
 
 export default async function DashboardPage() {
+  const user = await requireUserPage();
+  const memberOf = { members: { some: { userId: user.id } } };
   const [companies, buyerCount, tier1Count, reportCount, outreach] = await Promise.all([
     prisma.targetCompany.findMany({
+      where: memberOf,
       orderBy: { createdAt: 'desc' },
       take: 10,
       include: {
@@ -14,10 +18,14 @@ export default async function DashboardPage() {
         runs: { orderBy: { createdAt: 'desc' }, take: 1 },
       },
     }),
-    prisma.buyer.count(),
-    prisma.buyerScore.count({ where: { tier: 'Tier 1' } }),
-    prisma.report.count(),
-    prisma.outreachMessage.groupBy({ by: ['status'], _count: true }),
+    prisma.buyer.count({ where: { company: memberOf } }),
+    prisma.buyerScore.count({ where: { tier: 'Tier 1', buyer: { company: memberOf } } }),
+    prisma.report.count({ where: { company: memberOf } }),
+    prisma.outreachMessage.groupBy({
+      by: ['status'],
+      _count: true,
+      where: { company: memberOf },
+    }),
   ]);
 
   const stats = [

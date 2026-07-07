@@ -10,6 +10,7 @@ const TABS = [
   { slug: '/theses', label: 'Theses' },
   { slug: '/outreach', label: 'Outreach' },
   { slug: '/report', label: 'Report' },
+  { slug: '/activity', label: 'Activity' },
 ];
 
 export default function CompanyNav({ companyId }: { companyId: string }) {

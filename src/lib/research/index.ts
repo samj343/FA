@@ -22,6 +22,15 @@ const mockResearch: WebResearchService = {
 };
 
 export function getResearchService(): WebResearchService {
-  // Placeholder switch — add real providers here (e.g. "anthropic-web-search").
+  const provider = (process.env.WEB_RESEARCH_PROVIDER || '').toLowerCase();
+  if (provider === 'anthropic-web-search') {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      console.warn('WEB_RESEARCH_PROVIDER=anthropic-web-search requires ANTHROPIC_API_KEY — falling back to mock.');
+      return mockResearch;
+    }
+    const { anthropicWebSearchResearch } =
+      require('./anthropicWebSearch') as typeof import('./anthropicWebSearch');
+    return anthropicWebSearchResearch;
+  }
   return mockResearch;
 }

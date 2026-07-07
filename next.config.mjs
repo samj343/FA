@@ -1,8 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    // pdf-parse reads test fixtures at require-time if bundled; keep it external.
-    serverComponentsExternalPackages: ['pdf-parse'],
+    // pdf-parse reads test fixtures at require-time if bundled, and pdfkit
+    // loads its built-in AFM font files from disk — keep both external.
+    serverComponentsExternalPackages: ['pdf-parse', 'pdfkit'],
   },
 };
 

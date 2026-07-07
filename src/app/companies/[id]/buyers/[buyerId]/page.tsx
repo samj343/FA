@@ -2,7 +2,9 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { prisma } from '@/lib/db';
 import CompanyNav from '@/components/CompanyNav';
-import { PageTitle, Section, BulletList, TierBadge, ConfidenceBadge, parseArr } from '@/components/ui';
+import { PageTitle, Section, BulletList, TierBadge, ConfidenceBadge, StatusBadge, parseArr } from '@/components/ui';
+import { requireMemberPage } from '@/lib/page-auth';
+import ContactManager from '@/components/ContactManager';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,14 +13,41 @@ export default async function BuyerDetailPage({
 }: {
   params: { id: string; buyerId: string };
 }) {
+  await requireMemberPage(params.id);
   const buyer = await prisma.buyer.findFirst({
     where: { id: params.buyerId, companyId: params.id },
-    include: { research: true, score: true, thesis: true, company: true },
+    include: {
+      research: true,
+      score: true,
+      thesis: true,
+      company: true,
+      outreach: { orderBy: { createdAt: 'asc' } },
+    },
   });
   if (!buyer) notFound();
   const r = buyer.research;
   const s = buyer.score;
   const t = buyer.thesis;
+
+  // Simple CRM-style sequencing: order this buyer's drafts into the intended
+  // outreach sequence and derive the recommended next action from statuses.
+  const SEQUENCE = ['buyer_email', 'linkedin_message', 'corp_dev_email', 'product_leader_email', 'ceo_email', 'follow_up_email'];
+  const sequence = [...buyer.outreach].sort(
+    (a, b) => SEQUENCE.indexOf(a.messageType) - SEQUENCE.indexOf(b.messageType)
+  );
+  const nextAction = (() => {
+    const statuses = sequence.map((m) => m.status);
+    if (statuses.includes('Intro Call Scheduled')) return 'Prepare for the intro call using the first-call script.';
+    if (statuses.includes('NDA Requested')) return 'Coordinate the NDA, then share detailed materials.';
+    if (statuses.includes('Interested')) return 'Qualify interest and propose an NDA.';
+    if (statuses.includes('Not Interested')) return 'Park this buyer; revisit next quarter.';
+    if (statuses.includes('Follow-up Needed')) return 'Send the follow-up email (after approval).';
+    if (statuses.includes('Sent')) return 'Await response; mark Follow-up Needed after ~1 week of silence.';
+    if (statuses.includes('Approved')) return 'Send the approved message from your own email, then mark it Sent.';
+    if (statuses.includes('Needs Review')) return 'Review and approve the drafts on the Outreach tab.';
+    if (sequence.length === 0) return 'No drafts yet — generate outreach for top buyers on the Outreach tab.';
+    return 'Review drafts on the Outreach tab.';
+  })();
 
   return (
     <div>
@@ -100,6 +129,41 @@ export default async function BuyerDetailPage({
 
         <Section title="Evidence">
           <BulletList items={parseArr(r?.evidence)} empty="No evidence recorded — external verification required." />
+        </Section>
+
+        <Section title="Contacts">
+          <ContactManager companyId={params.id} buyerId={buyer.id} />
+        </Section>
+
+        <Section title="Outreach sequence">
+          <p className="mb-3 rounded-lg bg-slate-50 px-3 py-2 text-sm">
+            <span className="font-semibold text-slate-500">Next action: </span>
+            {nextAction}
+          </p>
+          {sequence.length === 0 ? (
+            <p className="text-sm italic text-slate-400">No outreach drafts for this buyer yet.</p>
+          ) : (
+            <ol className="space-y-2">
+              {sequence.map((m, i) => (
+                <li key={m.id} className="flex items-center justify-between gap-2 text-sm">
+                  <span>
+                    <span className="mr-2 text-xs font-bold text-slate-400">{i + 1}.</span>
+                    {m.messageType.replace(/_/g, ' ')}
+                    {m.sentAt && (
+                      <span className="ml-2 text-xs text-slate-400">
+                        sent {m.sentAt.toISOString().slice(0, 10)}
+                      </span>
+                    )}
+                  </span>
+                  <StatusBadge status={m.status} />
+                </li>
+              ))}
+            </ol>
+          )}
+          <p className="mt-3 text-[11px] text-slate-400">
+            Statuses are managed on the Outreach tab. Sending always happens from your own email —
+            the app never contacts buyers.
+          </p>
         </Section>
 
         {t && (

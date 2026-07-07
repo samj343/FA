@@ -2,6 +2,8 @@ import { notFound } from 'next/navigation';
 import { prisma } from '@/lib/db';
 import CompanyNav from '@/components/CompanyNav';
 import { PageTitle, Section, BulletList, ConfidenceBadge, parseArr } from '@/components/ui';
+import { requireMemberPage } from '@/lib/page-auth';
+import RetryRunButton from '@/components/RetryRunButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,6 +15,7 @@ async function artifact(companyId: string, kind: string): Promise<any | null> {
 }
 
 export default async function CompanyProfilePage({ params }: { params: { id: string } }) {
+  await requireMemberPage(params.id);
   const company = await prisma.targetCompany.findUnique({
     where: { id: params.id },
     include: { decks: true, runs: { orderBy: { createdAt: 'desc' }, take: 1 } },
@@ -35,15 +38,16 @@ export default async function CompanyProfilePage({ params }: { params: { id: str
       />
       <CompanyNav companyId={company.id} />
 
-      {run?.status === 'running' && (
+      {(run?.status === 'running' || run?.status === 'queued') && (
         <p className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-          Analysis in progress — sections fill in as agents complete.
+          {run.status === 'queued' ? 'Analysis queued…' : 'Analysis in progress — sections fill in as agents complete.'}
         </p>
       )}
       {run?.status === 'error' && (
-        <p className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">
-          Last run failed: {run.error}
-        </p>
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">
+          <span>Last run failed: {run.error}</span>
+          <RetryRunButton runId={run.id} />
+        </div>
       )}
 
       {!profile ? (

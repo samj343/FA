@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
+import { audit, guardCompany } from '@/lib/auth';
 
 const PatchSchema = z.object({
   acquisitionThesis: z.string().optional(),
@@ -19,6 +20,8 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string; buyerId: string } }
 ) {
+  const guard = await guardCompany(params.id, 'editor');
+  if (guard instanceof Response) return guard;
   const body = await req.json().catch(() => null);
   const parsed = PatchSchema.safeParse(body);
   if (!parsed.success) {
@@ -32,6 +35,14 @@ export async function PATCH(
   const updated = await prisma.buyerThesis.update({
     where: { buyerId: buyer.id },
     data: parsed.data,
+  });
+  await audit({
+    action: 'thesis.edited',
+    userId: guard.user.id,
+    companyId: params.id,
+    targetType: 'buyer_thesis',
+    targetId: buyer.id,
+    detail: { buyer: buyer.name, fields: Object.keys(parsed.data) },
   });
   return NextResponse.json(updated);
 }
