@@ -1,0 +1,233 @@
+// BuyerScope — M&A buyer-discovery workflow data model.
+//
+// Rich agent outputs (company profile, market map, valuation, ...) are stored
+// as JSON strings in AnalysisArtifact so the pipeline can evolve without
+// migrations; entities the user edits row-by-row (buyers, scores, theses,
+// outreach) are first-class tables.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model TargetCompany {
+  id                 String   @id @default(cuid())
+  name               String
+  website            String?
+  description        String?
+  sector             String?
+  subsector          String?
+  businessModel      String?
+  productDescription String?
+  customerSegments   String? // JSON array
+  revenueModel       String?
+  strategicAssets    String? // JSON array
+  risks              String? // JSON array
+  financialNotes     String? // free-text financials provided by the advisor
+  customerNotes      String?
+  founderNotes       String?
+  marketNotes        String?
+  preferredBuyerTypes String?
+  excludedBuyers     String? // JSON array of buyer names to exclude
+  confidentialityLevel String @default("high") // high | medium | low
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  decks       Deck[]
+  runs        AnalysisRun[]
+  artifacts   AnalysisArtifact[]
+  buyers      Buyer[]
+  outreach    OutreachMessage[]
+  reports     Report[]
+}
+
+model Deck {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       TargetCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  filename      String
+  storagePath   String
+  pageCount     Int?
+  extractedText String?
+  createdAt     DateTime @default(now())
+}
+
+// One row per pipeline execution; steps is a JSON array of
+// { key, label, status: pending|running|done|error, startedAt, endedAt }.
+model AnalysisRun {
+  id          String   @id @default(cuid())
+  companyId   String
+  company     TargetCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  status      String   @default("running") // running | done | error
+  currentStep String?
+  steps       String   // JSON
+  error       String?
+  provider    String   @default("mock")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Structured JSON outputs of pipeline stages, keyed by kind:
+// deck_intake | company_profile | financial_analysis | market_map |
+// competitive_landscape | valuation
+model AnalysisArtifact {
+  id        String   @id @default(cuid())
+  companyId String
+  company   TargetCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  kind      String
+  json      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, kind])
+}
+
+model Buyer {
+  id               String   @id @default(cuid())
+  companyId        String
+  company          TargetCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name             String
+  website          String?
+  buyerType        String   // Strategic | Adjacent Strategic | Competitor | PE-backed Platform | Customer-Buyer | Channel Partner | International Buyer
+  industry         String?
+  description      String?
+  initialRationale String?
+  buyerCategory    String?
+  estimatedFit     String?  // High | Medium | Low
+  researchNeeded   String?  // JSON array
+  excluded         Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  research  BuyerResearch?
+  score     BuyerScore?
+  thesis    BuyerThesis?
+  outreach  OutreachMessage[]
+  contacts  Contact[]
+}
+
+model BuyerResearch {
+  id                   String   @id @default(cuid())
+  buyerId              String   @unique
+  buyer                Buyer    @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  companyOverview      String?
+  relevantBusinessUnits String? // JSON array
+  strategicPriorities  String?  // JSON array
+  mAndAHistory         String?  // JSON array
+  recentRelevantNews   String?  // JSON array
+  financialCapacity    String?
+  productGap           String?
+  customerOverlap      String?
+  strategicFitSummary  String?
+  reasonsToAcquire     String?  // JSON array
+  reasonsNotToAcquire  String?  // JSON array
+  evidence             String?  // JSON array — sources / notes; "requires external verification" flags
+  confidenceScore      Int      @default(0)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model BuyerScore {
+  id                     String   @id @default(cuid())
+  buyerId                String   @unique
+  buyer                  Buyer    @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  productFit             Float    @default(0)
+  customerOverlap        Float    @default(0)
+  marketExpansionFit     Float    @default(0)
+  mAndAHistory           Float    @default(0)
+  financialCapacity      Float    @default(0)
+  competitivePressure    Float    @default(0)
+  integrationFeasibility Float    @default(0)
+  weightedScore          Float    @default(0)
+  tier                   String   @default("Tier 3")
+  rationale              String?
+  keyRisk                String?
+  confidenceScore        Int      @default(0)
+  manuallyEdited         Boolean  @default(false)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+model BuyerThesis {
+  id                       String   @id @default(cuid())
+  buyerId                  String   @unique
+  buyer                    Buyer    @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  acquisitionThesis        String?
+  productSynergy           String?
+  revenueSynergy           String?
+  customerSynergy          String?
+  technologySynergy        String?
+  dataSynergy              String?
+  teamOrTalentRationale    String?
+  competitiveRationale     String?
+  integrationPath          String?
+  potentialObjections      String?  // JSON array
+  objectionResponses       String?  // JSON array
+  recommendedOutreachAngle String?
+  bestContactType          String?
+  confidenceScore          Int      @default(0)
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  buyerId   String
+  buyer     Buyer    @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  name      String?
+  title     String?
+  type      String?  // corp_dev | product | ceo | other
+  email     String?
+  linkedin  String?
+  createdAt DateTime @default(now())
+}
+
+model OutreachMessage {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        TargetCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  buyerId        String?
+  buyer          Buyer?   @relation(fields: [buyerId], references: [id], onDelete: Cascade)
+  contactId      String?
+  messageType    String   // anonymous_teaser | buyer_email | linkedin_message | corp_dev_email | product_leader_email | ceo_email | first_call_script | objection_handling | follow_up_email
+  subject        String?
+  body           String
+  // Draft | Needs Review | Approved | Rejected | Sent | Follow-up Needed |
+  // Not Interested | Interested | NDA Requested | Intro Call Scheduled
+  status         String   @default("Needs Review")
+  approvedByUser Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  sentAt         DateTime?
+}
+
+model Report {
+  id        String   @id @default(cuid())
+  companyId String
+  company   TargetCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  title     String
+  markdown  String
+  createdAt DateTime @default(now())
+}
+
+// Singleton settings row (id = "default").
+model Settings {
+  id                  String @id @default("default")
+  weightProductFit    Float  @default(0.25)
+  weightCustomerOverlap Float @default(0.15)
+  weightMarketExpansion Float @default(0.15)
+  weightMAndAHistory  Float  @default(0.15)
+  weightFinancialCapacity Float @default(0.10)
+  weightCompetitivePressure Float @default(0.10)
+  weightIntegration   Float  @default(0.10)
+  outreachTone        String @default("banker") // banker | warm | direct
+  confidentialityLevel String @default("high")
+  defaultReportFormat String @default("markdown")
+  globalExcludedBuyers String? // JSON array
+  minScoreThreshold   Float  @default(0)
+  updatedAt           DateTime @updatedAt
+}
